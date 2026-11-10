@@ -12,6 +12,8 @@ interface PaperRegisterRecord {
   hb?: number;
   danger_signs?: string;
   referral_action?: string;
+  priority_level?: string;
+  dynamic_notes?: string;
   whatsapp_row_text: string;
   created_at: string;
 }

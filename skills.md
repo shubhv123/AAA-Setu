@@ -4,169 +4,86 @@
 
 These are the core executable skills (tools) exposed to `gnani/gnani-evon-v3.3-30B-A3B` via the **LiveKit Agents / OpenAI-compatible tool-calling interface**.
 
-Every skill executes deterministically and broadcasts state changes over WebSocket to the **Next.js Split-Screen Demo Dashboard**.
+Every skill executes deterministically, persists records to Neon PostgreSQL, and broadcasts real-time updates over WebSocket (<50ms) to the **Split-Screen Frontline Dashboard**.
 
 ---
 
-## Skill 1: `stage_asha_to_anmol_queue`
+## Unified Primary Skill: `log_flexible_health_interaction`
 
 ### When to Trigger
-When an ASHA worker reports a home visit by reading historical Sub-Centre vitals from the mother's physical MCP Card alongside current home-visit observations.
+Whenever a frontline worker (ASHA, ANM, or AWW) speaks a visit update, counseling record, clinic measurement, child illness report, or ration delivery.
 
 ### Why It Exists
-ASHAs do not have data-entry logins for MoHFW's ANMOL tablet app.
+Frontline healthcare visits are multifaceted. Workers do not always measure or report BP and Hb. They discuss nutrition, diarrhea, immunization, counseling, side effects, and social barriers. 
 
-This skill stages a pre-filled card organized by ASHA worker name so the ANM can approve and sync it to the RCH Portal in one tap.
+This unified skill:
+1. **Requires ONLY `rch_id`** (synthetic 12-digit ID starting with 999).
+2. **Accepts all clinical vitals as optional/nullable** (BP, Hb, Weight, Temp, Symptoms, Supplies).
+3. **Preserves zero information loss** via open-ended `dynamic_observations` for any other topics discussed.
+4. **Tracks unmentioned routine checks** as gentle reminders for the next clinic camp.
+5. **Generates non-diagnostic field recommendations** adhering strictly to NHM guidelines without making definitive medical diagnoses.
+6. **Stages for ANM verification** if reported by ASHA, or directly syncs to RCH if recorded by ANM.
 
 ### Input JSON Schema
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `asha_worker_name` | string | Yes | Name of the reporting ASHA worker. |
-| `beneficiary_name` | string | Yes | Name of the pregnant woman or mother. |
-| `rch_id` | string | Yes | 12-digit synthetic RCH ID from the MCP Card. |
-| `gestational_month` | integer | No | Current month of pregnancy (1–9). |
-| `mcp_card_last_bp` | string | No | Last BP recorded by the ANM at the Sub-Centre/VHSND (e.g., `"138/88"` or `"145/95"`). |
-| `mcp_card_last_hb` | number | No | Last Hemoglobin (g/dL) recorded by the ANM on the MCP Card (e.g., `8.4`). |
-| `home_danger_signs` | array of strings | Yes | Symptoms observed today (e.g., `["pedal_edema", "severe_headache", "blurred_vision", "bleeding", "high_fever", "none"]`). |
-| `ifa_tablets_remaining` | integer | No | Number of Iron Folic Acid tablets remaining with the mother. |
+| `rch_id` | string | **Yes** | 12-digit synthetic RCH ID (e.g., `"999000104829"`). ONLY mandatory identifier. |
+| `worker_role` | string (enum) | **Yes** | One of: `"ASHA"`, `"ANM"`, `"AWW"`. |
+| `worker_name` | string | Yes | Spoken name of the frontline worker (e.g., `"Geeta Devi"`). |
+| `beneficiary_name` | string | No | Spoken name of the mother or child (e.g., `"Sunita Devi"`). |
+| `bp_reading` | string | No | Spoken Blood Pressure (e.g., `"142/92"`). |
+| `bp_source` | string (enum) | No | `"MCP_CARD_HISTORY"` (if read from card by ASHA) or `"LIVE_ANM_MEASURED"`. |
+| `hb_g_dl` | number | No | Hemoglobin in g/dL (e.g., `8.4` or `11.2`). |
+| `weight_kg` | number | No | Beneficiary or child weight in kg (e.g., `52.5`). |
+| `temperature_f` | number | No | Measured body temperature in °F (e.g., `101.4`). |
+| `reported_symptoms` | array of strings | No | Specific symptoms mentioned (e.g., `["pedal_edema", "severe_headache"]`). |
+| `supplies_or_meds` | array of strings | No | Medications or supplies discussed (e.g., `["10 IFA tablets left", "ORS packet given"]`). |
+| `poshan_joint_visit_num` | integer | No | Mandated Poshan joint visit number (`8`, `9`, `11`, `14`, `15`). |
+| `dynamic_observations` | array of objects | No | Catch-all for any other details spoken (zero information loss). |
+| `unmentioned_routine_checks` | array of strings | No | Standard checks not mentioned (e.g., `["Blood Pressure (BP)", "Hemoglobin (Hb)"]`). |
+
+### Dynamic Observations Schema (`dynamic_observations`)
+Each item in `dynamic_observations` captures rich contextual data:
+```json
+{
+  "category": "Maternal | Child_Health | Nutrition_THR | Immunization | Counseling_Social | General",
+  "field_label": "Short descriptive label in English (e.g., IFA Nausea Adherence)",
+  "spoken_value": "Exact detail spoken by the worker in native script and English",
+  "status": "Normal | Note | Attention"
+}
+```
 
 ---
 
-## Skill 2: `commit_anm_vhsnd_record`
+## Non-Diagnostic Recommendation Engine (`CareRecommendation`)
 
-### When to Trigger
-When an Auxiliary Nurse Midwife (ANM) directly dictates clinical measurements during a Village Health, Sanitation, and Nutrition Day (VHSND) or Sub-Centre ANC check-up.
+### Medical Safety Architecture
+The system functions as an AI field decision-support assistant under the banner:
+**`"AI-Generated Field Recommendations & Risk Indicators for ANM / Medical Officer Review"`**
 
-### Why It Exists
-ANMs have direct login permissions for ANMOL and perform clinical diagnostics, including:
+It **NEVER** issues medical diagnoses. Instead, it evaluates indicators against NHM field guidelines to produce:
 
-- Blood Pressure (BP)
-- Hemoglobin (Hb)
-- Urine Albumin
-- TT Injection
-- Weight
-
-### Input JSON Schema
-
-| Field | Type | Required | Description |
-|---|---|---|---|
-| `anm_worker_name` | string | Yes | Name of the ANM worker. |
-| `rch_id` | string | Yes | RCH ID of the beneficiary. |
-| `beneficiary_name` | string | Yes | Name of the pregnant woman or mother. |
-| `anc_visit_number` | integer | Yes | ANC visit number (1, 2, 3, or 4). |
-| `measured_bp_systolic` | integer | Yes | Measured systolic BP. |
-| `measured_bp_diastolic` | integer | Yes | Measured diastolic BP. |
-| `measured_hb_g_dl` | number | Yes | Measured Hemoglobin in g/dL. |
-| `weight_kg` | number | Yes | Beneficiary's weight in kilograms. |
-| `urine_albumin` | string (enum) | Yes | One of: `negative`, `trace`, `positive`. |
-| `ifa_tablets_issued` | integer | Yes | Number of IFA tablets issued. |
-| `tt_booster_given` | boolean | Yes | Whether the TT booster was administered. |
+```json
+{
+  "priority_level": "ROUTINE | ATTENTION_NEEDED | URGENT_PHC_REFERRAL",
+  "observed_indicators_summary": "Factual non-diagnostic summary (e.g., 'Last Sub-Centre BP was 142/92 combined with newly reported pedal swelling today.')",
+  "recommended_next_steps": [
+    "Advise immediate clinical evaluation by Medical Officer at Primary Health Centre",
+    "Advise taking IFA tablet after night meal with lemon water to relieve nausea",
+    "Note: BP and Hb were not recorded today; schedule check at upcoming VHSND camp"
+  ],
+  "spoken_reply_native": "Warm, natural 2-sentence spoken Indic response for Gnani Timbre v2.5 TTS readout."
+}
+```
 
 ---
 
-## Skill 3: `evaluate_maternal_red_flags`
+## Supporting Sub-Operations
 
-### When to Trigger
-Automatically invoked inside the backend whenever Skill 1 or Skill 2 runs.
+### 1. `sync_poshan_joint_visit`
+Automatically triggered when `poshan_joint_visit_num` is in `[8, 9, 11, 14, 15]`.
+Caches in offline queue if connectivity drops and syncs to MWCD upon reconnection.
 
-### Why It Exists
-Combines deterministic NHM clinical rules with Evon v3.3 reasoning so high-risk pregnancies are never missed.
-
-### Deterministic Triage Rules
-
-#### 1. Severe Pre-Eclampsia / Eclampsia Risk
-
-**Severity:** CRITICAL
-
-**Condition:**
-
-- Systolic BP ≥ 140 OR diastolic BP ≥ 90.
-- AND at least one of the following:
-  - `pedal_edema`
-  - `severe_headache`
-  - `blurred_vision`
-  - `urine_albumin == "positive"`
-
-**Action:**
-
-- Flag for MCP Card Red Seal.
-- Trigger immediate PHC Medical Officer referral.
-- Trigger 108 ambulance referral alert.
-
-#### 2. Borderline Hypertension Watch
-
-**Severity:** URGENT
-
-**Condition:**
-
-- Systolic BP ≥ 135 OR diastolic BP ≥ 85, as recorded on the MCP Card.
-- AND new `pedal_edema` or `severe_headache` observed by ASHA during the home visit.
-
-**Action:**
-
-- Urgent same-day ANM Sub-Centre BP re-check required.
-
-#### 3. Severe Maternal Anemia
-
-**Severity:** CRITICAL
-
-**Condition:**
-
-- Hemoglobin (Hb) < 7.0 g/dL: Severe anemia.
-- Hemoglobin (Hb) < 9.0 g/dL with fatigue/pallor: Moderate-to-high anemia risk.
-
-**Action:**
-
-- Flag for PHC referral and clinician-directed iron sucrose assessment.
-- Track the prescribed IFA dose and adherence.
-
----
-
-## Skill 4: `sync_poshan_joint_visit`
-
-### When to Trigger
-When the voice update mentions a joint home visit with the Anganwadi Worker (AWW) or child nutrition/growth tracking.
-
-### Why It Exists
-MWCD's Poshan Tracker (v25.3.14) mandates joint ASHA + AWW execution for Home Visits 8, 9, 11, 14, and 15.
-
-The application disables the "Next" button when offline.
-
-This skill caches the joint visit payload using an offline-first approach and synchronizes it when connectivity returns.
-
-### Input JSON Schema
-
-| Field | Type | Required | Description |
-|---|---|---|---|
-| `visit_number` | integer (enum) | Yes | One of: `8`, `9`, `11`, `14`, `15`. |
-| `child_or_mother_name` | string | Yes | Name of the child or mother. |
-| `child_weight_kg` | number | No | Child's weight in kilograms. |
-| `lbw_counseling_shown` | boolean | No | Whether Low Birth Weight (LBW) counseling was completed. |
-| `thr_packets_verified` | integer | No | Number of Take-Home Ration (THR) packets verified. |
-
----
-
-## Skill 5: `generate_paper_register_row`
-
-### When to Trigger
-At the conclusion of every voice entry.
-
-### Why It Exists
-Quality auditors still demand physical paper registers during inspections.
-
-This skill formats the exact extracted fields into a clean row matching the physical register columns and sends it to the worker's WhatsApp screen.
-
----
-
-# 4. `rules.md` — Engineering, API & Compliance Guardrails
-
-Save the block below as `rules.md` (and copy it into `.cursorrules` if you use Cursor).
-
-It enforces:
-
-- Hackathon disqualification rules.
-- Gnani API constraints.
-- Evon v3.3 optimization rules.
-
-(**Note**: Consult the `Gnani` MCP to verify things here if needed.)
+### 2. `generate_paper_register_row`
+Automatically triggered for every interaction. Formats a WhatsApp-ready row matching the physical paper audit register columns (Date, RCH ID, Name, Village, Worker, Vitals, Dynamic Observations, Recommendations).

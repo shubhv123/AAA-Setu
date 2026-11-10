@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Mic, MicOff, Volume2, VolumeX, AlertTriangle, Play, Sparkles, Radio, Loader2 } from 'lucide-react';
+import { Mic, MicOff, Volume2, VolumeX, AlertTriangle, Radio, Loader2, Info } from 'lucide-react';
 import { encodeWAV, resampleAudio } from '../utils/audio';
 
 interface VoiceSimulatorProps {
@@ -21,8 +21,13 @@ export const VoiceSimulator: React.FC<VoiceSimulatorProps> = ({
   const [language, setLanguage] = useState<'hi-IN' | 'mr-IN' | 'or-IN' | 'kn-IN'>('hi-IN');
   const [noiseEnabled, setNoiseEnabled] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
+  const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [transcriptPreview, setTranscriptPreview] = useState<string>('');
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  const [promptMessage, setPromptMessage] = useState<string | null>(null);
+
+  // Recording timer ref
+  const timerRef = useRef<any>(null);
 
   // Audio Context & Web Audio Noise Synthesizer (Simulating 75dB VHSND clinic noise: crowd chatter + baby cries + drone)
   const audioCtxRef = useRef<AudioContext | null>(null);
@@ -34,13 +39,6 @@ export const VoiceSimulator: React.FC<VoiceSimulatorProps> = ({
   const micStreamRef = useRef<MediaStream | null>(null);
   const processorRef = useRef<ScriptProcessorNode | null>(null);
   const pcmChunksRef = useRef<Float32Array[]>([]);
-
-  // 60-Second Demo Target Utterance (Sunita Devi, Joint Visit #8)
-  const DEMO_PRESET_ASHA =
-    "Main ASHA Geeta bol rahi hoon. RCH ID 999000104829, Sunita Devi, satva mahina, Joint Visit number 8. MCP card mein pichle camp ka BP 142 by 92 aur Hb 8.4 likha hai. Aaj Sunita ke pairon mein sujan hai aur tez sar dard hai. Uske paas 10 IFA goli bachi hain.";
-
-  const DEMO_PRESET_ANM =
-    "RCH ID 999000104830, Meena Kumari, ANC 2, weight 54 kilo, BP 118 by 76, Hb 11.2, urine albumin negative, TT booster given, 30 IFA tablets issued.";
 
   // Web Audio 75dB Clinic Noise Generator
   useEffect(() => {
@@ -134,49 +132,10 @@ export const VoiceSimulator: React.FC<VoiceSimulatorProps> = ({
     return () => cancelAnimationFrame(animId);
   }, [isRecording, noiseEnabled, isProcessing]);
 
-  // Execute Pipeline via Preset Spoken Text
-  const handleRunPreset = async (textToUse: string) => {
-    setApiError(null);
-    setIsProcessing(true);
-    setTranscriptPreview(textToUse);
-
-    try {
-      const res = await fetch('/api/voice/process-json', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          spoken_text: textToUse,
-          source_role: role,
-          language_code: language,
-          offline_poshan: false,
-        }),
-      });
-
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({ detail: res.statusText }));
-        throw new Error(errData.detail || `HTTP ${res.status}`);
-      }
-
-      const data = await res.json();
-      onSessionProcessed(data);
-
-      if (data.spoken_audio_b64) {
-        const audioSrc = `data:audio/wav;base64,${data.spoken_audio_b64}`;
-        setAudioUrl(audioSrc);
-        const player = new Audio(audioSrc);
-        player.play().catch((e) => console.log('Audio autoplay prevented:', e));
-      }
-    } catch (err: any) {
-      console.error('API Error in Voice Pipeline:', err);
-      setApiError(err.message || String(err));
-    } finally {
-      setIsProcessing(false);
-    }
-  };
-
   // Live Microphone Recording (Genuine 16-bit 16kHz PCM WAV with RIFF Header)
   const startRecording = async () => {
     setApiError(null);
+    setPromptMessage(null);
     pcmChunksRef.current = [];
     try {
       const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
@@ -207,6 +166,11 @@ export const VoiceSimulator: React.FC<VoiceSimulatorProps> = ({
       processor.connect(ctx.destination);
 
       setIsRecording(true);
+      setRecordingSeconds(0);
+      if (timerRef.current) clearInterval(timerRef.current);
+      timerRef.current = setInterval(() => {
+        setRecordingSeconds((prev) => prev + 1);
+      }, 1000);
     } catch (e: any) {
       setApiError(`Microphone access error: ${e.message}`);
     }
@@ -215,6 +179,10 @@ export const VoiceSimulator: React.FC<VoiceSimulatorProps> = ({
   const stopRecording = async () => {
     if (!isRecording) return;
     setIsRecording(false);
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
 
     if (processorRef.current) {
       processorRef.current.disconnect();
@@ -272,7 +240,13 @@ export const VoiceSimulator: React.FC<VoiceSimulatorProps> = ({
 
       const data = await res.json();
       setTranscriptPreview(data.transcript || 'Transcribed audio successfully');
-      onSessionProcessed(data);
+      
+      if (data.status === 'AWAITING_RCH_ID') {
+        setPromptMessage(data.prompt_message || 'Kripya labharthi ka 12-digit RCH ID batayein.');
+      } else {
+        setPromptMessage(null);
+        onSessionProcessed(data);
+      }
 
       if (data.spoken_audio_b64) {
         const audioSrc = `data:audio/wav;base64,${data.spoken_audio_b64}`;
@@ -370,32 +344,6 @@ export const VoiceSimulator: React.FC<VoiceSimulatorProps> = ({
         </div>
       </div>
 
-      {/* Preset Demo Utterance Button (The 60-Second Video Target) */}
-      <div className="space-y-2">
-        <div className="flex items-center justify-between">
-          <span className="text-xs font-semibold text-slate-700 flex items-center gap-1.5">
-            <Sparkles className="w-3.5 h-3.5 text-amber-500" />
-            Instant Demo Utterance:
-          </span>
-          <span className="text-[10px] bg-blue-50 text-blue-700 px-2 py-0.5 rounded-full font-medium">
-            Sunita Devi (Visit #8)
-          </span>
-        </div>
-
-        <button
-          onClick={() => handleRunPreset(role === 'ASHA_RELAY' ? DEMO_PRESET_ASHA : DEMO_PRESET_ANM)}
-          disabled={isProcessing || isRecording}
-          className="w-full text-left bg-blue-50/60 hover:bg-blue-50 border border-blue-200 rounded-lg p-2.5 transition-all text-xs text-slate-700 group disabled:opacity-50"
-        >
-          <div className="flex items-start gap-2">
-            <Play className="w-4 h-4 text-blue-600 mt-0.5 shrink-0 group-hover:scale-110 transition-transform" />
-            <p className="italic leading-relaxed">
-              "{role === 'ASHA_RELAY' ? DEMO_PRESET_ASHA : DEMO_PRESET_ANM}"
-            </p>
-          </div>
-        </button>
-      </div>
-
       {/* Live Mic Action Buttons */}
       <div className="flex items-center gap-2 pt-1">
         {!isRecording ? (
@@ -405,22 +353,28 @@ export const VoiceSimulator: React.FC<VoiceSimulatorProps> = ({
             className="flex-1 bg-red-600 hover:bg-red-700 text-white font-medium py-2 px-4 rounded-lg flex items-center justify-center gap-2 text-xs shadow-sm transition-colors disabled:opacity-50"
           >
             <Mic className="w-4 h-4" />
-            Speak Live with Mic
+            Speak Live with Mic (Up to 1 min)
           </button>
         ) : (
           <button
             onClick={stopRecording}
-            className="flex-1 bg-slate-900 hover:bg-black text-white font-medium py-2 px-4 rounded-lg flex items-center justify-center gap-2 text-xs shadow-sm transition-colors animate-pulse"
+            className="flex-1 bg-slate-900 hover:bg-black text-white font-medium py-2 px-4 rounded-lg flex items-center justify-between gap-2 text-xs shadow-sm transition-colors animate-pulse"
           >
-            <MicOff className="w-4 h-4 text-red-400" />
-            Stop & Process Audio
+            <div className="flex items-center gap-2">
+              <MicOff className="w-4 h-4 text-red-400" />
+              <span>Stop & Process Audio</span>
+            </div>
+            <div className="font-mono text-red-300 font-bold bg-slate-800 px-2 py-0.5 rounded text-[11px]">
+              {String(Math.floor(recordingSeconds / 60)).padStart(2, '0')}:
+              {String(recordingSeconds % 60).padStart(2, '0')} / 01:00
+            </div>
           </button>
         )}
 
         {isProcessing && (
           <div className="flex items-center gap-2 text-xs text-blue-600 font-medium px-3 py-2 bg-blue-50 rounded-lg border border-blue-200 animate-pulse">
             <Loader2 className="w-4 h-4 animate-spin" />
-            Processing...
+            Transcribing & Triaging...
           </div>
         )}
       </div>
@@ -443,6 +397,18 @@ export const VoiceSimulator: React.FC<VoiceSimulatorProps> = ({
           <div className="space-y-1">
             <p className="font-semibold">Gnani API Exception Surfaced:</p>
             <p className="font-mono text-[11px] break-all">{apiError}</p>
+          </div>
+        </div>
+      )}
+
+      {/* Polite RCH ID Prompt Alert */}
+      {promptMessage && (
+        <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-xs text-blue-800 flex items-start gap-2 animate-pulse">
+          <Info className="w-4 h-4 text-blue-600 shrink-0 mt-0.5" />
+          <div className="space-y-0.5">
+            <p className="font-semibold text-blue-900">Mandatory Identifier Needed:</p>
+            <p className="italic font-medium">"{promptMessage}"</p>
+            <p className="text-[11px] text-blue-600">Only the 12-digit RCH ID is required to log this record (no vitals mandatory).</p>
           </div>
         </div>
       )}

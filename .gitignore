@@ -27,5 +27,10 @@ Thumbs.db
 .idea/
 .vscode/
 
-*.md
+# Media & Video
+video_frames/
+*.mp4
 
+# Markdown files
+*.md
+**/*.md

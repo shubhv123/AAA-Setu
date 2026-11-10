@@ -3,7 +3,11 @@ import logging
 from datetime import date
 from typing import Dict, Any, List, Optional
 from backend.database import get_db_pool
-from agent.triage_engine import evaluate_maternal_red_flags, TriageResult
+from agent.recommendation_engine import (
+    generate_care_recommendation,
+    evaluate_care_recommendation,
+    CareRecommendation,
+)
 
 logger = logging.getLogger("aaa_setu.tools")
 
@@ -15,26 +19,34 @@ async def generate_paper_register_row(
     bp: Optional[str],
     hb: Optional[float],
     danger_signs: List[str],
-    referral_action: str
+    priority_level: str,
+    referral_action: str,
+    dynamic_observations: Optional[List[Dict[str, Any]]] = None
 ) -> Dict[str, Any]:
     """
-    Skill 5: Formats extracted indicators into a clean WhatsApp-friendly row matching
-    the exact columns of the physical MoHFW audit register.
+    Skill: Formats extracted indicators into a clean WhatsApp-friendly row matching
+    the exact physical MoHFW audit register columns without mental math.
     """
     today_str = date.today().isoformat()
-    signs_str = ", ".join(danger_signs) if danger_signs else "None"
+    signs_str = ", ".join(danger_signs) if danger_signs else "None recorded"
     
+    dyn_lines = []
+    if dynamic_observations:
+        for obs in dynamic_observations:
+            dyn_lines.append(f"• *{obs.get('field_label', 'Note')}:* {obs.get('spoken_value')}")
+    dyn_text = "\n".join(dyn_lines) if dyn_lines else "• *Field Notes:* Routine follow-up"
+
     whatsapp_row = (
-        f"📋 *MoHFW Register Entry*\n"
+        f"📋 *MoHFW Physical Audit Register Row*\n"
         f"• *Date:* {today_str}\n"
         f"• *RCH ID:* `{rch_id}`\n"
         f"• *Beneficiary:* {mother_name}\n"
         f"• *Village:* {village}\n"
         f"• *Reported By:* {worker_name}\n"
-        f"• *Last BP:* {bp or 'N/A'}\n"
-        f"• *Hb Level:* {hb or 'N/A'} g/dL\n"
-        f"• *Danger Signs:* {signs_str}\n"
-        f"• *Referral / Action:* {referral_action}"
+        f"• *Vitals:* BP: {bp or 'Not Recorded'} | Hb: {f'{hb} g/dL' if hb else 'Not Recorded'}\n"
+        f"• *Reported Symptoms:* {signs_str}\n"
+        f"{dyn_text}\n"
+        f"• *AI Priority & Action:* [{priority_level}] {referral_action}"
     )
 
     pool = await get_db_pool()
@@ -43,8 +55,8 @@ async def generate_paper_register_row(
             """
             INSERT INTO paper_register_records (
                 record_date, rch_id, mother_name, village, worker_name,
-                bp, hb, danger_signs, referral_action, whatsapp_row_text
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                bp, hb, danger_signs, referral_action, dynamic_notes, priority_level, whatsapp_row_text
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             RETURNING record_id;
             """,
             date.today(),
@@ -56,6 +68,8 @@ async def generate_paper_register_row(
             hb,
             signs_str,
             referral_action,
+            json.dumps(dynamic_observations or []),
+            priority_level,
             whatsapp_row
         )
 
@@ -74,7 +88,7 @@ async def sync_poshan_joint_visit(
     offline_cached: bool = False
 ) -> Dict[str, Any]:
     """
-    Skill 4: Captures mandated MWCD Poshan Tracker Joint Home Visits (8, 9, 11, 14, 15).
+    Skill: Captures mandated MWCD Poshan Tracker Joint Home Visits (8, 9, 11, 14, 15).
     Operates offline-first and syncs when connectivity returns.
     """
     if visit_number not in [8, 9, 11, 14, 15]:
@@ -107,203 +121,163 @@ async def sync_poshan_joint_visit(
         "joint_verified": True
     }
 
-async def stage_asha_to_anmol_queue(
-    asha_worker_name: str,
-    beneficiary_name: str,
+async def log_flexible_health_interaction(
     rch_id: str,
-    gestational_month: Optional[int] = None,
-    mcp_card_last_bp: Optional[str] = None,
-    mcp_card_last_hb: Optional[float] = None,
-    home_danger_signs: Optional[List[str]] = None,
-    ifa_tablets_remaining: Optional[int] = None,
-    joint_visit_number: Optional[int] = None,
-    offline_poshan: bool = False
+    worker_role: str = "ASHA",
+    worker_name: str = "Frontline Worker",
+    beneficiary_name: Optional[str] = None,
+    bp_reading: Optional[str] = None,
+    bp_source: Optional[str] = None,
+    hb_g_dl: Optional[float] = None,
+    weight_kg: Optional[float] = None,
+    temperature_f: Optional[float] = None,
+    reported_symptoms: Optional[List[str]] = None,
+    supplies_or_meds: Optional[List[str]] = None,
+    poshan_joint_visit_num: Optional[int] = None,
+    dynamic_observations: Optional[List[Dict[str, Any]]] = None,
+    unmentioned_routine_checks: Optional[List[str]] = None,
+    language_code: str = "hi-IN",
+    offline_poshan: bool = False,
+    recommendation: Optional[CareRecommendation] = None
 ) -> Dict[str, Any]:
     """
-    Skill 1: Stages pre-filled verification card in ANM's ANMOL queue.
-    ASHA worker has NO direct write access.
+    Core Unified Skill: Logs any frontline interaction with ONLY rch_id mandatory.
+    Zero information loss, open-ended observations, and non-diagnostic NHM recommendations.
+    Uses Evon v3.3 recommendation if provided, or generates via recommendation engine.
     """
-    danger_signs = home_danger_signs or []
-    pool = await get_db_pool()
+    ben_name = beneficiary_name or f"Beneficiary #{rch_id[-4:]}"
+    danger_signs = reported_symptoms or []
+    dyn_obs = dynamic_observations or []
+    unmentioned = unmentioned_routine_checks or []
+    supplies = supplies_or_meds or []
 
-    # Look up beneficiary village & assigned ANM from synthetic_mcp_cards
-    async with pool.acquire() as conn:
-        beneficiary_row = await conn.fetchrow(
-            "SELECT village, assigned_anm FROM synthetic_mcp_cards WHERE rch_id = $1;",
-            rch_id
+    # 1. Non-Diagnostic Care Recommendation (Evon v3.3 or local engine)
+    if recommendation is not None:
+        rec = recommendation
+    else:
+        rec = await evaluate_care_recommendation(
+            rch_id=rch_id,
+            worker_role=worker_role,
+            worker_name=worker_name,
+            beneficiary_name=ben_name,
+            bp_reading=bp_reading,
+            bp_source=bp_source,
+            hb_g_dl=hb_g_dl,
+            weight_kg=weight_kg,
+            temperature_f=temperature_f,
+            reported_symptoms=danger_signs,
+            supplies_or_meds=supplies,
+            poshan_joint_visit_num=poshan_joint_visit_num,
+            dynamic_observations=dyn_obs,
+            unmentioned_routine_checks=unmentioned,
+            language_code=language_code
         )
 
-    village = beneficiary_row["village"] if beneficiary_row else "Kishanpur"
-    assigned_anm = beneficiary_row["assigned_anm"] if beneficiary_row else "Nurse Kavita"
+    # 2. Database lookups & defaults
+    pool = await get_db_pool()
+    village = "Sub-Centre Area"
+    async with pool.acquire() as conn:
+        beneficiary_row = await conn.fetchrow(
+            "SELECT village, mother_name FROM synthetic_mcp_cards WHERE rch_id = $1;",
+            rch_id
+        )
+        if beneficiary_row:
+            village = beneficiary_row["village"]
+            if not beneficiary_name:
+                ben_name = beneficiary_row["mother_name"]
 
-    # Evaluate deterministic NHM clinical triage
-    triage: TriageResult = evaluate_maternal_red_flags(
-        bp_str=mcp_card_last_bp,
-        hb_level=mcp_card_last_hb,
-        danger_signs=danger_signs,
-        asha_worker_name=asha_worker_name,
-        beneficiary_name=beneficiary_name,
-        anm_worker_name=assigned_anm
-    )
+    # 3. Role-based approval status
+    # ANMs commit directly to SYNCED_TO_RCH; ASHAs stage to PENDING_VERIFICATION for ANM review
+    anm_status = "SYNCED_TO_RCH" if worker_role == "ANM" else "PENDING_VERIFICATION"
+    source_role_tag = f"{worker_role}_RELAY" if worker_role != "ANM" else "ANM_DIRECT"
 
-    # Insert into anmol_verification_queue (PENDING_VERIFICATION)
+    # 4. Insert into anmol_verification_queue
     async with pool.acquire() as conn:
         queue_id = await conn.fetchval(
             """
             INSERT INTO anmol_verification_queue (
-                source_role, asha_worker_name, rch_id, recorded_bp, recorded_hb,
-                danger_signs_json, triage_severity, triage_action_hindi, anm_approval_status
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-            RETURNING queue_id;
+                source_role, asha_worker_name, rch_id, beneficiary_name,
+                recorded_bp, bp_source, recorded_hb, weight_kg, temperature_f,
+                danger_signs_json, supplies_or_meds, dynamic_observations,
+                unmentioned_routine_checks, priority_level, observed_indicators_summary,
+                recommended_next_steps, triage_severity, triage_action_hindi,
+                spoken_reply_native, anm_approval_status
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
+            ) RETURNING queue_id;
             """,
-            "ASHA_RELAY",
-            asha_worker_name,
+            source_role_tag,
+            f"{worker_role} {worker_name}",
             rch_id,
-            mcp_card_last_bp,
-            mcp_card_last_hb,
+            ben_name,
+            bp_reading,
+            bp_source,
+            hb_g_dl,
+            weight_kg,
+            temperature_f,
             json.dumps(danger_signs),
-            triage.severity,
-            triage.action_hindi,
-            "PENDING_VERIFICATION"
+            json.dumps(supplies),
+            json.dumps(dyn_obs),
+            json.dumps(unmentioned),
+            rec.priority_level,
+            rec.observed_indicators_summary,
+            json.dumps(rec.recommended_next_steps),
+            rec.priority_level,
+            rec.spoken_reply_native,
+            rec.spoken_reply_native,
+            anm_status
         )
 
-        # If red seal flagged, update baseline card
-        if triage.flag_red_seal:
+        # If red seal alert indicated, update baseline card
+        if rec.flag_red_seal:
             await conn.execute(
                 "UPDATE synthetic_mcp_cards SET high_risk_red_seal = TRUE WHERE rch_id = $1;",
                 rch_id
             )
 
-    # Handle Joint Poshan Visit if indicated
+    # 5. Handle Joint Poshan Visit if indicated
     poshan_res = None
-    if joint_visit_number in [8, 9, 11, 14, 15]:
+    if poshan_joint_visit_num in [8, 9, 11, 14, 15]:
         poshan_res = await sync_poshan_joint_visit(
             rch_id=rch_id,
-            visit_number=joint_visit_number,
-            child_or_mother_name=beneficiary_name,
+            visit_number=poshan_joint_visit_num,
+            child_or_mother_name=ben_name,
+            child_weight_kg=weight_kg,
             offline_cached=offline_poshan
         )
 
-    # Generate physical paper register row
+    # 6. Generate physical paper register row
+    first_action = rec.recommended_next_steps[0] if rec.recommended_next_steps else "Routine monitoring"
     register_res = await generate_paper_register_row(
         rch_id=rch_id,
-        mother_name=beneficiary_name,
+        mother_name=ben_name,
         village=village,
-        worker_name=f"ASHA {asha_worker_name}",
-        bp=mcp_card_last_bp,
-        hb=mcp_card_last_hb,
+        worker_name=f"{worker_role} {worker_name}",
+        bp=bp_reading,
+        hb=hb_g_dl,
         danger_signs=danger_signs,
-        referral_action=triage.action_english
+        priority_level=rec.priority_level,
+        referral_action=first_action,
+        dynamic_observations=dyn_obs
     )
 
     return {
         "queue_id": queue_id,
         "rch_id": rch_id,
-        "beneficiary_name": beneficiary_name,
-        "triage": {
-            "severity": triage.severity,
-            "condition": triage.condition_name,
-            "action_hindi": triage.action_hindi,
-            "action_english": triage.action_english,
-            "flag_red_seal": triage.flag_red_seal
+        "beneficiary_name": ben_name,
+        "recommendation": {
+            "priority_level": rec.priority_level,
+            "observed_indicators_summary": rec.observed_indicators_summary,
+            "recommended_next_steps": rec.recommended_next_steps,
+            "spoken_reply_native": rec.spoken_reply_native,
+            "flag_red_seal": rec.flag_red_seal,
+            "referral_needed": rec.referral_needed,
+            "details": rec.details,
+            "identified_flags": getattr(rec, "identified_flags", rec.details)
         },
         "poshan": poshan_res,
         "paper_register": register_res,
-        "status": "STAGED_IN_ANMOL_QUEUE"
+        "status": "RECORDED_SUCCESSFULLY",
+        "anm_approval_status": anm_status
     }
-
-async def commit_anm_vhsnd_record(
-    anm_worker_name: str,
-    rch_id: str,
-    beneficiary_name: str,
-    anc_visit_number: int,
-    measured_bp_systolic: int,
-    measured_bp_diastolic: int,
-    measured_hb_g_dl: float,
-    weight_kg: float,
-    urine_albumin: str,
-    ifa_tablets_issued: int,
-    tt_booster_given: bool
-) -> Dict[str, Any]:
-    """
-    Skill 2: Directly commits clinical measurements by ANM at VHSND / Sub-Centre.
-    ANM has direct write permission.
-    """
-    bp_str = f"{measured_bp_systolic}/{measured_bp_diastolic}"
-    danger_signs = []
-    if urine_albumin.lower() == "positive":
-        danger_signs.append("urine_albumin_positive")
-
-    triage: TriageResult = evaluate_maternal_red_flags(
-        bp_str=bp_str,
-        hb_level=measured_hb_g_dl,
-        danger_signs=danger_signs,
-        urine_albumin=urine_albumin,
-        beneficiary_name=beneficiary_name,
-        anm_worker_name=anm_worker_name
-    )
-
-    pool = await get_db_pool()
-    async with pool.acquire() as conn:
-        # Insert directly as SYNCED_TO_RCH
-        queue_id = await conn.fetchval(
-            """
-            INSERT INTO anmol_verification_queue (
-                source_role, asha_worker_name, rch_id, recorded_bp, recorded_hb,
-                danger_signs_json, triage_severity, triage_action_hindi, anm_approval_status
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-            RETURNING queue_id;
-            """,
-            "ANM_DIRECT",
-            f"ANM {anm_worker_name}",
-            rch_id,
-            bp_str,
-            measured_hb_g_dl,
-            json.dumps(danger_signs),
-            triage.severity,
-            triage.action_hindi,
-            "SYNCED_TO_RCH"
-        )
-
-        # Update synthetic MCP Card
-        await conn.execute(
-            """
-            UPDATE synthetic_mcp_cards SET
-                last_subcentre_bp = $1,
-                last_subcentre_hb = $2,
-                last_vhsnd_date = $3,
-                high_risk_red_seal = $4
-            WHERE rch_id = $5;
-            """,
-            bp_str,
-            measured_hb_g_dl,
-            date.today(),
-            triage.flag_red_seal,
-            rch_id
-        )
-
-    # Generate physical paper register row
-    register_res = await generate_paper_register_row(
-        rch_id=rch_id,
-        mother_name=beneficiary_name,
-        village="Kishanpur",
-        worker_name=f"ANM {anm_worker_name}",
-        bp=bp_str,
-        hb=measured_hb_g_dl,
-        danger_signs=danger_signs,
-        referral_action=triage.action_english
-    )
-
-    return {
-        "queue_id": queue_id,
-        "rch_id": rch_id,
-        "triage": {
-            "severity": triage.severity,
-            "condition": triage.condition_name,
-            "action_hindi": triage.action_hindi,
-            "flag_red_seal": triage.flag_red_seal
-        },
-        "paper_register": register_res,
-        "status": "SYNCED_TO_RCH"
-    }
-

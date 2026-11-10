@@ -42,13 +42,14 @@ It solves the **Double Documentation & Broken Handoff Crisis** across India's ru
 - Switches on 75dB Background Noise (crying babies, crowd chatter).
 - Speaks naturally: *"Main ASHA Geeta bol rahi hoon. RCH ID 999000104829, Sunita Devi, satva mahina, Joint Visit number 8. MCP card mein pichle camp ka BP 142 by 92 aur Hb 8.4 likha hai. Aaj Sunita ke pairon mein sujan hai aur tez sar dard hai. Uske paas 10 IFA goli bachi hain."*
 - Prisma STT filters noise, converts spoken numbers to clean digits (142/92, 8.4, 10).
-- Evon v3.3 extracts JSON fields and triage engine flags High-Risk Pre-Eclampsia & Severe Anemia.
-- Timbre v2.5 immediately speaks back the emergency referral instruction.
+- Evon v3.3 extracts open-ended fields and dynamic observations without information loss.
+- Non-Diagnostic Recommendation Engine identifies `URGENT_PHC_REFERRAL` (factual summary of elevated BP + swelling) and practical NHM action steps without declaring a medical disease.
+- Timbre v2.5 immediately speaks back the referral recommendation in regional voice.
 - WhatsApp paper register row is formatted and saved for audit inspections.
 
 ### Phase 2: The ANM Nurse’s Workflow (At Sub-Centre / VHSND Camp)
 - Nurse Kavita views the "ASHA-Wise Verification Queue" on her ANMOL tablet view.
-- Sees the pre-filled verification card staged under "Reported by: ASHA Geeta" with 🔴 CRITICAL: Pre-Eclampsia & Severe Anemia badge.
+- Sees the pre-filled verification card staged under "Reported by: ASHA Geeta" with 🚨 **URGENT PHC REFERRAL: AI Field Recommendation (Non-Diagnostic)** badge.
 - Taps single button: "Approve & Sync to RCH Portal" (zero typing).
 - ANM can also switch to "ANM Camp Mode" for hands-free dictation during noisy clinics.
 

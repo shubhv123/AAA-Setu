@@ -111,7 +111,7 @@ export const PoshanSyncPanel: React.FC<PoshanSyncPanelProps> = ({
                     </span>
                   </div>
                   <div className="text-[11px] text-slate-500 mt-1">
-                    Beneficiary: <strong>{v.child_or_mother_name || 'Sunita Devi'}</strong> (RCH: {v.rch_id})
+                    Beneficiary: <strong>{v.child_or_mother_name || 'Beneficiary'}</strong> (RCH: {v.rch_id})
                     {v.thr_packets_verified && ` • THR Packets: ${v.thr_packets_verified}`}
                   </div>
                 </div>
